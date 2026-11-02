@@ -1,0 +1,14 @@
+name: iOS and scoring
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test scoring
+        run: swift test
+      - name: Build iPhone simulator app
+        run: >-
+          xcodebuild -project Soshima.xcodeproj -scheme Soshima
+          -sdk iphonesimulator -configuration Debug
+          -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build

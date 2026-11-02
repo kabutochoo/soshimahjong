@@ -1,0 +1,140 @@
+import Foundation
+
+public struct Rules: Codable, Equatable {
+    public var startingPoints: Int
+    public var returnPoints: Int
+    public var uma: [Int]
+    /// Yen per one score point (1,000 table points).
+    public var yenPerScore: Int
+
+    public init(startingPoints: Int = 25_000, returnPoints: Int = 30_000,
+                uma: [Int] = [30, 10, -10, -30], yenPerScore: Int = 0) {
+        self.startingPoints = startingPoints
+        self.returnPoints = returnPoints
+        self.uma = uma
+        self.yenPerScore = yenPerScore
+    }
+
+    public static let mLeague = Rules()
+    public var oka: Int {
+        let (difference, overflow) = returnPoints.subtractingReportingOverflow(startingPoints)
+        let (value, multipliedOverflow) = difference.multipliedReportingOverflow(by: 4)
+        return overflow || multipliedOverflow ? 0 : value
+    }
+}
+
+public struct Player: Codable, Identifiable, Equatable {
+    public var id: UUID
+    public var name: String
+    public init(id: UUID = UUID(), name: String) { self.id = id; self.name = name }
+}
+
+public struct ResultRow: Identifiable, Equatable {
+    public var id: UUID { player.id }
+    public let player: Player
+    public let points: Int
+    public let rank: Int
+    public let baseUnits: Int
+    public let umaUnits: Int
+    public let okaUnits: Int
+    /// Exact units: 60 units = one score point, including three-way ties.
+    public var scoreUnits: Int { baseUnits + umaUnits + okaUnits }
+    public var score: Double { Double(scoreUnits) / 60 }
+    public var yen: Int
+}
+
+public struct Payment: Identifiable, Equatable {
+    public var id: String { from.id.uuidString + to.id.uuidString }
+    public let from: Player
+    public let to: Player
+    public let yen: Int
+}
+
+public enum ScoringError: String, Error, LocalizedError {
+    case playerCount = "4人分の名前と持ち点を入力してください。"
+    case names = "名前は重複しないよう、全員分入力してください。"
+    case rules = "持ち点・返し点は100点単位、ウマの合計は0、単価は0〜10,000円にしてください。"
+    case points = "持ち点は−100,000〜200,000点の範囲で、100点単位で入力してください。"
+    case total = "持ち点の合計が開始時の合計と一致していません。供託を精算してから保存してください。"
+    public var errorDescription: String? { rawValue }
+}
+
+public enum Scoring {
+    public static func calculate(players: [Player], points: [Int], rules: Rules) throws -> [ResultRow] {
+        guard players.count == 4, points.count == 4, Set(players.map(\.id)).count == 4 else {
+            throw ScoringError.playerCount
+        }
+        let names = players.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard names.allSatisfy({ !$0.isEmpty }), Set(names).count == 4 else { throw ScoringError.names }
+        guard (100...100_000).contains(rules.startingPoints),
+              (100...100_000).contains(rules.returnPoints),
+              rules.startingPoints % 100 == 0, rules.returnPoints % 100 == 0,
+              rules.uma.count == 4, rules.uma.allSatisfy({ (-1000...1000).contains($0) }),
+              rules.uma.reduce(0, +) == 0, (0...10_000).contains(rules.yenPerScore) else {
+            throw ScoringError.rules
+        }
+        guard points.allSatisfy({ (-100_000...200_000).contains($0) && $0 % 100 == 0 }) else {
+            throw ScoringError.points
+        }
+        guard points.reduce(0, +) == rules.startingPoints * 4 else { throw ScoringError.total }
+
+        // Seats determine display order only. Tied ranks share the occupied ranks' bonuses.
+        let order = (0..<4).sorted { points[$0] == points[$1] ? $0 < $1 : points[$0] > points[$1] }
+        var rows: [ResultRow] = []
+        var position = 0
+        while position < 4 {
+            let tied = order.dropFirst(position).prefix { points[$0] == points[order[position]] }
+            let count = tied.count
+            let bonus = rules.uma[position..<(position + count)].reduce(0, +) * 60 / count
+            let oka = position == 0 ? rules.oka * 60 / 1000 / count : 0
+            for seat in tied {
+                rows.append(ResultRow(player: players[seat], points: points[seat], rank: position + 1,
+                                      baseUnits: (points[seat] - rules.returnPoints) * 60 / 1000,
+                                      umaUnits: bonus, okaUnits: oka, yen: 0))
+            }
+            position += count
+        }
+        // Largest remainder allocation balances whole yen, including tied fractional amounts.
+        let numerators = rows.map { $0.scoreUnits * rules.yenPerScore }
+        let floors = numerators.map { Int(floor(Double($0) / 60)) }
+        var balances = floors
+        let remainder = -floors.reduce(0, +)
+        let priority = rows.indices.sorted {
+            let a = numerators[$0] - floors[$0] * 60
+            let b = numerators[$1] - floors[$1] * 60
+            return a == b ? $0 < $1 : a > b
+        }
+        for index in priority.prefix(max(0, remainder)) { balances[index] += 1 }
+        for index in rows.indices { rows[index].yen = balances[index] }
+        return rows
+    }
+
+    public static func payments(for rows: [ResultRow]) -> [Payment] {
+        var debtors = rows.filter { $0.yen < 0 }.map { ($0.player, -$0.yen) }
+        var creditors = rows.filter { $0.yen > 0 }.map { ($0.player, $0.yen) }
+        var result: [Payment] = []
+        var d = 0, c = 0
+        while d < debtors.count && c < creditors.count {
+            let amount = min(debtors[d].1, creditors[c].1)
+            result.append(Payment(from: debtors[d].0, to: creditors[c].0, yen: amount))
+            debtors[d].1 -= amount
+            creditors[c].1 -= amount
+            if debtors[d].1 == 0 { d += 1 }
+            if creditors[c].1 == 0 { c += 1 }
+        }
+        return result
+    }
+}
+
+public struct GameRecord: Codable, Identifiable {
+    public let id: UUID
+    public let date: Date
+    public let players: [Player]
+    public let points: [Int]
+    public let rules: Rules
+    public init(players: [Player], points: [Int], rules: Rules) {
+        self.id = UUID(); self.date = Date()
+        self.players = players; self.points = points; self.rules = rules
+    }
+    public var results: [ResultRow] { (try? Scoring.calculate(players: players, points: points, rules: rules)) ?? [] }
+}
