@@ -248,6 +248,8 @@ struct EntryView: View {
                     }.padding(.vertical, 8)
                     LabeledContent("いまのルール", value: "\(store.state.rules.startingPoints.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点持ち・\(store.state.rules.returnPoints.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点返し")
                         .numberFont(.caption)
+                    LabeledContent("スコア端数", value: store.state.rules.scoreRounding?.title ?? "端数を残す")
+                        .numberFont(.caption)
                 }
                 Section {
                     Picker("入力方法", selection: rankMode) {
@@ -454,6 +456,13 @@ struct ResultView: View {
             if record.endedByBankruptcy {
                 Section { Label("飛び終了", systemImage: "flag.checkered").foregroundStyle(accent) }
             }
+            if let rounding = record.rules.scoreRounding {
+                Section("スコアの端数") {
+                    Text("\(rounding.title)（1スコア単位）")
+                    Text("丸めた後の差分は1位のトップ調整に反映します。同点1位は均等配分するため、調整後に小数が残る場合があります。")
+                        .numberFont(.caption).foregroundStyle(.secondary)
+                }
+            }
             Section("スコア") {
                 ForEach(rows) { row in
                     VStack(alignment: .leading, spacing: 10) {
@@ -473,6 +482,12 @@ struct ResultView: View {
                         scoreDetail("オカ", units: row.okaUnits)
                         if row.bankruptcyUnits != 0 {
                             scoreDetail("飛びボーナス", units: row.bankruptcyUnits)
+                        }
+                        if record.rules.scoreRounding != nil {
+                            scoreDetail("端数処理", units: row.roundingUnits)
+                        }
+                        if row.topAdjustmentUnits != 0 {
+                            scoreDetail("トップ調整", units: row.topAdjustmentUnits)
                         }
                         if record.rules.yenPerScore > 0 {
                             HStack {
@@ -578,6 +593,17 @@ struct RulesView: View {
     @FocusState private var editing: String?
     @State private var customRate = false
     private let rates = [0, 30, 50, 100, 200, 500, 1000]
+    private var roundsScores: Binding<Bool> {
+        Binding(get: { store.state.rules.scoreRounding != nil },
+                set: { enabled in
+                    finishEditing()
+                    store.state.rules.scoreRounding = enabled ? .nearest : nil
+                })
+    }
+    private var roundingMode: Binding<ScoreRounding> {
+        Binding(get: { store.state.rules.scoreRounding ?? .nearest },
+                set: { store.state.rules.scoreRounding = $0 })
+    }
     private var rateSelection: Binding<Int> {
         Binding(get: { customRate || !rates.contains(store.state.rules.yenPerScore) ? -1 : store.state.rules.yenPerScore },
                 set: { value in
@@ -613,8 +639,24 @@ struct RulesView: View {
                     ForEach(0..<4, id: \.self) { index in
                         integerField("\(index + 1)位", value: $store.state.rules.uma[index])
                     }
-                    Text("合計が0になるよう設定してください。同点は該当順位のウマの平均です。小数のスコアは表示時のみ小数1桁に丸めます。")
+                    Text("合計が0になるよう設定してください。同点は該当順位のウマの平均です。")
                         .numberFont(.caption).foregroundStyle(.secondary)
+                }
+                Section("スコア端数の処理") {
+                    Toggle("1スコア単位に丸める", isOn: roundsScores).numberFont()
+                    if let rounding = store.state.rules.scoreRounding {
+                        Picker("丸め方", selection: roundingMode) {
+                            ForEach(ScoreRounding.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }.pickerStyle(.menu)
+                        Text(rounding.explanation).numberFont(.caption).foregroundStyle(.secondary)
+                        Text("素点・ウマ・オカ・飛びボーナスを合計したスコアを丸めます。合計が0になるよう差分を1位で調整します。同点1位は均等配分するため、調整後に小数が残る場合があります。")
+                            .numberFont(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("小数のスコアをそのまま使います。Mリーグのプリセットでは丸めません。以前のバージョンで保存した記録も端数を保持します。")
+                            .numberFont(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section("飛び終了") {
                     Toggle("0点未満で終了する", isOn: $store.state.rules.bankruptcyEnabled).numberFont()

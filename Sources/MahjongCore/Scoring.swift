@@ -47,6 +47,45 @@ public enum RankedInput {
     }
 }
 
+public enum ScoreRounding: String, Codable, CaseIterable, Identifiable {
+    case up
+    case nearest
+    case fiveDownSixUp
+    case down
+
+    public var id: String { rawValue }
+    public var title: String {
+        switch self {
+        case .up: return "切り上げ"
+        case .nearest: return "四捨五入"
+        case .fiveDownSixUp: return "五捨六入"
+        case .down: return "切り捨て"
+        }
+    }
+    public var explanation: String {
+        switch self {
+        case .up: return "+12.4 → +13、−12.4 → −12。数直線のプラス方向へ丸めます。"
+        case .nearest: return "+12.5 → +13、−12.5 → −13。絶対値の小数が0.5以上なら繰り上げます。"
+        case .fiveDownSixUp: return "+12.5 → +12、+12.6 → +13。−12.5 → −12、−12.6 → −13。絶対値の小数が0.6以上なら繰り上げます。"
+        case .down: return "+12.4 → +12、−12.4 → −13。数直線のマイナス方向へ丸めます。"
+        }
+    }
+
+    /// Accepts exact 1/60 score units and returns an integer score.
+    public func roundedScore(from units: Int) -> Int {
+        let whole = units / 60
+        let remainder = units % 60
+        switch self {
+        case .up: return whole + (remainder > 0 ? 1 : 0)
+        case .down: return whole - (remainder < 0 ? 1 : 0)
+        case .nearest:
+            return whole + (abs(remainder) >= 30 ? (units < 0 ? -1 : 1) : 0)
+        case .fiveDownSixUp:
+            return whole + (abs(remainder) >= 36 ? (units < 0 ? -1 : 1) : 0)
+        }
+    }
+}
+
 public struct Rules: Codable, Equatable {
     public var startingPoints: Int
     public var returnPoints: Int
@@ -55,9 +94,11 @@ public struct Rules: Codable, Equatable {
     public var yenPerScore: Int
     public var bankruptcyEnabled: Bool
     public var bankruptcyBonus: Int
+    /// nil preserves fractional scores for M League and records saved before this option existed.
+    public var scoreRounding: ScoreRounding?
 
     private enum CodingKeys: String, CodingKey {
-        case startingPoints, returnPoints, uma, yenPerScore, bankruptcyEnabled, bankruptcyBonus
+        case startingPoints, returnPoints, uma, yenPerScore, bankruptcyEnabled, bankruptcyBonus, scoreRounding
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -67,17 +108,20 @@ public struct Rules: Codable, Equatable {
         yenPerScore = try c.decode(Int.self, forKey: .yenPerScore)
         bankruptcyEnabled = try c.decodeIfPresent(Bool.self, forKey: .bankruptcyEnabled) ?? false
         bankruptcyBonus = try c.decodeIfPresent(Int.self, forKey: .bankruptcyBonus) ?? 10
+        scoreRounding = try c.decodeIfPresent(ScoreRounding.self, forKey: .scoreRounding)
     }
 
     public init(startingPoints: Int = 25_000, returnPoints: Int = 30_000,
                 uma: [Int] = [30, 10, -10, -30], yenPerScore: Int = 0,
-                bankruptcyEnabled: Bool = false, bankruptcyBonus: Int = 10) {
+                bankruptcyEnabled: Bool = false, bankruptcyBonus: Int = 10,
+                scoreRounding: ScoreRounding? = nil) {
         self.startingPoints = startingPoints
         self.returnPoints = returnPoints
         self.uma = uma
         self.yenPerScore = yenPerScore
         self.bankruptcyEnabled = bankruptcyEnabled
         self.bankruptcyBonus = bankruptcyBonus
+        self.scoreRounding = scoreRounding
     }
 
     public static let mLeague = Rules()
@@ -104,7 +148,10 @@ public struct ResultRow: Identifiable, Equatable {
     public let okaUnits: Int
     /// Exact units: 60 units = one score point, including three-way ties.
     public var bankruptcyUnits: Int = 0
-    public var scoreUnits: Int { baseUnits + umaUnits + okaUnits + bankruptcyUnits }
+    public var roundingUnits: Int = 0
+    public var topAdjustmentUnits: Int = 0
+    public var rawScoreUnits: Int { baseUnits + umaUnits + okaUnits + bankruptcyUnits }
+    public var scoreUnits: Int { rawScoreUnits + roundingUnits + topAdjustmentUnits }
     public var score: Double { Double(scoreUnits) / 60 }
     public var yen: Int
 }
@@ -181,6 +228,16 @@ public enum Scoring {
                 }
             }
         } else if !bankruptcyTransfers.isEmpty { throw ScoringError.bankruptcy }
+        if let rounding = rules.scoreRounding {
+            for index in rows.indices {
+                let raw = rows[index].rawScoreUnits
+                rows[index].roundingUnits = rounding.roundedScore(from: raw) * 60 - raw
+            }
+            // The top absorbs the residual. Equal first places share it equally, preserving ties.
+            let correction = -rows.reduce(0) { $0 + $1.scoreUnits }
+            let topIndices = rows.indices.filter { rows[$0].rank == 1 }
+            for index in topIndices { rows[index].topAdjustmentUnits = correction / topIndices.count }
+        }
         // Largest remainder allocation balances whole yen, including tied fractional amounts.
         let numerators = rows.map { $0.scoreUnits * rules.yenPerScore }
         let floors = numerators.map { Int(floor(Double($0) / 60)) }
