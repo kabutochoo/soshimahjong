@@ -138,7 +138,7 @@ struct EntryView: View {
                             HStack(alignment: .firstTextBaseline) {
                                 TextField("25000", text: $store.state.inputs[index])
                                     .keyboardType(.numbersAndPunctuation)
-                                    .font(.system(.title, design: .rounded).weight(.semibold))
+                                    .font(.system(.largeTitle, design: .rounded).weight(.semibold))
                                     .monospacedDigit().focused($focused, equals: .points(index))
                                     .submitLabel(index == 3 ? .done : .next)
                                     .onSubmit { if index < 3 { focused = .points(index + 1) } else { finishInput() } }
@@ -242,23 +242,27 @@ struct ResultView: View {
                 ForEach(rows) { row in
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(alignment: .firstTextBaseline) {
-                            Text("\(row.rank)位").font(.caption.bold()).foregroundStyle(.secondary)
+                            Text("\(row.rank)位").font(.title3.bold()).foregroundStyle(.secondary)
                             Text(row.player.name).font(.headline)
                             Spacer()
-                            Text(scoreText(row.score)).font(.system(.title2, design: .rounded).bold())
+                            Text(scoreText(row.score)).font(.system(.largeTitle, design: .rounded).bold())
                                 .foregroundStyle(row.score >= 0 ? accent : .primary)
                         }
-                        Text("\(row.points.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点  ／  素点 \(scoreText(Double(row.baseUnits) / 60))  ウマ \(scoreText(Double(row.umaUnits) / 60))  オカ \(scoreText(Double(row.okaUnits) / 60))")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        LabeledContent("最終持ち点") {
+                            Text("\(row.points.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点")
+                                .font(.title2.bold()).monospacedDigit()
+                        }
+                        scoreDetail("素点", units: row.baseUnits)
+                        scoreDetail("ウマ", units: row.umaUnits)
+                        scoreDetail("オカ", units: row.okaUnits)
                         if row.bankruptcyUnits != 0 {
-                            Text("飛びボーナス \(scoreText(Double(row.bankruptcyUnits) / 60))")
-                                .font(.caption.bold()).foregroundStyle(accent)
+                            scoreDetail("飛びボーナス", units: row.bankruptcyUnits)
                         }
                         if record.rules.yenPerScore > 0 {
                             HStack {
                                 Text(row.yen >= 0 ? "受け取り" : "支払い").font(.caption)
                                 Spacer()
-                                Text(yenText(row.yen)).font(.headline).monospacedDigit()
+                                Text(yenText(row.yen)).font(.title2.bold()).monospacedDigit()
                             }
                         }
                     }.padding(.vertical, 6)
@@ -291,6 +295,11 @@ struct ResultView: View {
             }
         }.navigationTitle(onSave == nil ? "半荘の記録" : "今回の結果")
     }
+    private func scoreDetail(_ title: String, units: Int) -> some View {
+        LabeledContent(title) {
+            Text(scoreText(Double(units) / 60)).font(.title2.weight(.semibold)).monospacedDigit()
+        }
+    }
 }
 
 struct HistoryView: View {
@@ -310,10 +319,10 @@ struct HistoryView: View {
                                 HStack {
                                     Text(player.name)
                                     Spacer()
-                                    Text(scoreText(rows.reduce(0) { $0 + $1.score })).bold().monospacedDigit()
+                                    Text(scoreText(rows.reduce(0) { $0 + $1.score })).font(.title.bold()).monospacedDigit()
                                 }
                                 Text("累計収支 \(yenText(rows.reduce(0) { $0 + $1.yen }))")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .font(.title3).foregroundStyle(.secondary)
                             }
                         }
                         Text("累計収支は保存時の単価で集計した結果です。支払い済みかどうかは管理しません。")
@@ -407,7 +416,7 @@ struct RulesView: View {
                             Text(rate == 0 ? "換算しない（0円）" : "\(rate)円").tag(rate)
                         }
                         Text("その他").tag(-1)
-                    }.pickerStyle(.menu)
+                    }.pickerStyle(.menu).font(.title3)
                     if rateSelection.wrappedValue == -1 {
                         integerField("その他の金額（円）", value: $store.state.rules.yenPerScore)
                     }
@@ -430,6 +439,7 @@ struct RulesView: View {
             Text(title)
             Spacer()
             TextField(title, value: value, format: .number.grouping(.never).locale(Locale(identifier: "en_US_POSIX")))
+                .font(.system(.title2, design: .rounded).weight(.semibold))
                 .multilineTextAlignment(.trailing).keyboardType(.numbersAndPunctuation)
                 .monospacedDigit().focused($editing, equals: title)
                 .submitLabel(.done).onSubmit { finishEditing() }
