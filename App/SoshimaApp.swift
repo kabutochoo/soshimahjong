@@ -426,6 +426,25 @@ func yenText(_ yen: Int) -> String {
     (yen > 0 ? "+" : "") + yen.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))) + "円"
 }
 
+private struct SettlementSummary: View {
+    let yen: Int
+
+    private var amount: String {
+        yen.magnitude.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))) + "円"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(yen < 0 ? "\(amount)の負け" : yen > 0 ? "\(amount)の勝ち" : "収支は0円")
+                .numberFont(.subheadline).foregroundStyle(.secondary)
+            Text(yen < 0 ? "全体に支払う合計" : yen > 0 ? "受け取る合計" : "支払い・受け取りなし")
+                .font(.subheadline)
+            Text(amount).numberFont(.title2, weight: .bold)
+                .foregroundStyle(yen < 0 ? accent : .primary)
+        }
+    }
+}
+
 struct ResultView: View {
     let record: GameRecord
     var onSave: (() -> Void)? = nil
@@ -457,7 +476,7 @@ struct ResultView: View {
                         }
                         if record.rules.yenPerScore > 0 {
                             HStack {
-                                Text(row.yen >= 0 ? "受け取り" : "支払い").numberFont(.caption)
+                                Text("今回の収支").numberFont(.caption)
                                 Spacer()
                                 Text(yenText(row.yen)).numberFont(.title2, weight: .bold).monospacedDigit()
                             }
@@ -470,13 +489,14 @@ struct ResultView: View {
                     Text("金額換算はオフです。「ルール」で1スコアあたりの円を設定できます。")
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(Scoring.payments(for: rows)) { payment in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("\(payment.from.name) → \(payment.to.name)")
-                            Text("\(payment.yen.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))円").numberFont(.title3, weight: .bold).monospacedDigit()
-                        }
+                    ForEach(rows) { row in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(row.player.name).font(.headline)
+                            SettlementSummary(yen: row.yen)
+                        }.padding(.vertical, 6)
                     }
-                    if Scoring.payments(for: rows).isEmpty { Text("支払いはありません。") }
+                    Text("各人の収支をまとめた精算額です。負けた人は表示された合計額を支払います。")
+                        .numberFont(.caption).foregroundStyle(.secondary)
                     Text("1スコア = \(record.rules.yenPerScore.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))円。1円未満は合計が一致するよう端数調整します。")
                         .numberFont(.caption).foregroundStyle(.secondary)
                 }
@@ -518,8 +538,7 @@ struct HistoryView: View {
                                     Spacer()
                                     Text(scoreText(rows.reduce(0) { $0 + $1.score })).numberFont(.title, weight: .bold).monospacedDigit()
                                 }
-                                Text("累計収支 \(yenText(rows.reduce(0) { $0 + $1.yen }))")
-                                    .numberFont(.title3).foregroundStyle(.secondary)
+                                SettlementSummary(yen: rows.reduce(0) { $0 + $1.yen })
                             }
                         }
                         Text("累計収支は保存時の単価で集計した結果です。支払い済みかどうかは管理しません。")
