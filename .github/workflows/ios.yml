@@ -12,3 +12,8 @@ jobs:
           xcodebuild -project Soshima.xcodeproj -scheme Soshima
           -sdk iphonesimulator -configuration Debug
           -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build
+      - name: Build Release for iPhone simulator
+        run: >-
+          xcodebuild -project Soshima.xcodeproj -scheme Soshima
+          -sdk iphonesimulator -configuration Release
+          -derivedDataPath DerivedData/Release CODE_SIGNING_ALLOWED=NO build

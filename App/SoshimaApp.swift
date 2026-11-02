@@ -684,6 +684,7 @@ struct RulesView: View {
                 Section {
                     Text("ルール変更は次に保存する記録に反映されます。過去の記録は保存時のルールを保持します。記録はこのiPhone内に保存され、アプリ削除時は失われます。")
                         .numberFont(.caption).foregroundStyle(.secondary)
+                    NavigationLink("プライバシーポリシー") { PrivacyPolicyView() }
                 }
             }.navigationTitle("ルール")
                 .onDisappear { finishEditing() }
@@ -703,5 +704,43 @@ struct RulesView: View {
                 .submitLabel(.done).onSubmit { finishEditing() }
                 .accessibilityLabel(title)
         }
+    }
+}
+
+private struct PrivacyPolicyDocument: Decodable {
+    let title: String
+    let updated: String
+    let sections: [PolicySection]
+
+    struct PolicySection: Decodable, Identifiable {
+        var id: String { title }
+        let title: String
+        let body: String
+    }
+}
+
+private struct PrivacyPolicyView: View {
+    private var policy: PrivacyPolicyDocument? {
+        guard let url = Bundle.main.url(forResource: "PrivacyPolicy", withExtension: "json"),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(PrivacyPolicyDocument.self, from: data)
+    }
+
+    var body: some View {
+        List {
+            if let policy {
+                Section { Text("最終更新：\(policy.updated)").numberFont(.footnote).foregroundStyle(.secondary) }
+                ForEach(policy.sections) { section in
+                    Section(section.title) {
+                        Text(section.body).textSelection(.enabled)
+                    }
+                }
+            } else {
+                ContentUnavailableView("ポリシーを読み込めませんでした", systemImage: "doc.text",
+                                       description: Text("アプリを更新して、もう一度お試しください。"))
+            }
+        }
+        .navigationTitle("プライバシーポリシー")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
