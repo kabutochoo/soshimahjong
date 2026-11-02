@@ -1,5 +1,52 @@
 import Foundation
 
+public enum RankedInputError: Error, LocalizedError {
+    case selection
+    case ascending(higherRank: Int, lowerRank: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .selection:
+            return "4人の名前を1位から4位まで重複なく選んでください。"
+        case let .ascending(higherRank, lowerRank):
+            return "\(lowerRank)位の持ち点が\(higherRank)位を上回っています。名前か持ち点を確認してください。"
+        }
+    }
+}
+
+/// Rank rows are a view of the canonical player-indexed input, never new player identities.
+public enum RankedInput {
+    public struct Selection {
+        public let order: [Int]
+        public let inputs: [String]
+    }
+
+    public static func isValidOrder(_ order: [Int]) -> Bool {
+        order.count == 4 && Set(order) == Set(0..<4)
+    }
+
+    public static func select(playerIndex: Int, at rankIndex: Int, order: [Int],
+                              inputs: [String]) throws -> Selection {
+        guard isValidOrder(order), inputs.count == 4, (0..<4).contains(playerIndex),
+              (0..<4).contains(rankIndex), let previousRank = order.firstIndex(of: playerIndex) else {
+            throw RankedInputError.selection
+        }
+        var nextOrder = order
+        var nextInputs = inputs
+        // Keep the points in each visible rank row when its selected name changes.
+        nextInputs.swapAt(order[rankIndex], playerIndex)
+        nextOrder.swapAt(rankIndex, previousRank)
+        return Selection(order: nextOrder, inputs: nextInputs)
+    }
+
+    public static func validate(points: [Int], order: [Int]) throws {
+        guard points.count == 4, isValidOrder(order) else { throw RankedInputError.selection }
+        for rank in 1..<4 where points[order[rank - 1]] < points[order[rank]] {
+            throw RankedInputError.ascending(higherRank: rank, lowerRank: rank + 1)
+        }
+    }
+}
+
 public struct Rules: Codable, Equatable {
     public var startingPoints: Int
     public var returnPoints: Int

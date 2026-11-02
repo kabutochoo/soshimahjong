@@ -6,6 +6,9 @@ struct SavedState: Codable {
     var inputs = Array(repeating: "25000", count: 4)
     var rules = Rules.mLeague
     var records: [GameRecord] = []
+    // Optional fields keep drafts from earlier versions readable.
+    var inputByRank: Bool?
+    var rankOrder: [Int]?
 }
 
 @MainActor
@@ -125,6 +128,91 @@ struct EntryView: View {
     private enum InputField: Hashable { case name(Int), points(Int) }
     @FocusState private var focused: InputField?
     @State private var recipients: [UUID: UUID] = [:]
+    @State private var editingNames = false
+
+    private var isRankMode: Bool { store.state.inputByRank ?? true }
+    private var rankOrder: [Int] {
+        if let order = store.state.rankOrder, RankedInput.isValidOrder(order) { return order }
+        return Array(0..<4)
+    }
+    private var sortedPlayerIndices: [Int] {
+        guard let points else { return Array(0..<4) }
+        return (0..<4).sorted { points[$0] == points[$1] ? $0 < $1 : points[$0] > points[$1] }
+    }
+    private var displayOrder: [Int] { isRankMode ? rankOrder : Array(0..<4) }
+    private var rankMode: Binding<Bool> {
+        Binding(get: { isRankMode }, set: { value in
+            finishInput()
+            var next = store.state
+            if value { next.rankOrder = sortedPlayerIndices }
+            next.inputByRank = value
+            store.state = next
+            validation = nil
+        })
+    }
+
+    private func playerSelection(at rank: Int) -> Binding<Int> {
+        Binding(get: { rankOrder[rank] }, set: { playerIndex in
+            finishInput()
+            guard rankOrder[rank] != playerIndex else { return }
+            do {
+                let selection = try RankedInput.select(playerIndex: playerIndex, at: rank,
+                                                       order: rankOrder, inputs: store.state.inputs)
+                var next = store.state
+                next.rankOrder = selection.order
+                next.inputs = selection.inputs
+                store.state = next
+                validation = nil
+                // Changing the assigned points can change who went bankrupt.
+                recipients = [:]
+            } catch { validation = error.localizedDescription }
+        })
+    }
+
+    private func focusNextPoint(after playerIndex: Int) {
+        guard let row = displayOrder.firstIndex(of: playerIndex), row < 3 else {
+            finishInput()
+            return
+        }
+        focused = .points(displayOrder[row + 1])
+    }
+
+    private func pointRow(_ row: Int) -> some View {
+        let index = displayOrder[row]
+        return VStack(alignment: .leading, spacing: 8) {
+            if isRankMode {
+                Picker(selection: playerSelection(at: row)) {
+                    ForEach(0..<4, id: \.self) { playerIndex in
+                        Text(store.state.players[playerIndex].name.isEmpty
+                             ? "プレイヤー\(playerIndex + 1)" : store.state.players[playerIndex].name)
+                            .tag(playerIndex)
+                    }
+                } label: {
+                    Text("\(row + 1)位").numberFont(.title3, weight: .bold)
+                        .foregroundStyle(accent)
+                }
+                .pickerStyle(.menu)
+                .accessibilityLabel("\(row + 1)位の名前")
+            } else {
+                TextField("名前", text: $store.state.players[index].name)
+                    .font(.subheadline).textInputAutocapitalization(.never)
+                    .focused($focused, equals: .name(index))
+                    .submitLabel(.next)
+                    .onSubmit { focused = .points(index) }
+                    .accessibilityLabel("\(index + 1)人目の名前")
+            }
+            HStack(alignment: .firstTextBaseline) {
+                TextField("25000", text: $store.state.inputs[index])
+                    .keyboardType(.numbersAndPunctuation)
+                    .numberFont(.largeTitle, weight: .semibold, design: .rounded)
+                    .monospacedDigit().focused($focused, equals: .points(index))
+                    .submitLabel(row == 3 ? .done : .next)
+                    .onSubmit { focusNextPoint(after: index) }
+                    .accessibilityLabel("\(store.state.players[index].name)の持ち点")
+                Text("点").foregroundStyle(.secondary)
+            }
+        }.padding(.vertical, 5)
+    }
 
     private var transfers: [BankruptcyTransfer] {
         guard store.state.rules.bankruptcyEnabled, store.state.rules.bankruptcyBonus > 0, let points else { return [] }
@@ -162,27 +250,27 @@ struct EntryView: View {
                         .numberFont(.caption)
                 }
                 Section {
-                    ForEach(0..<4, id: \.self) { index in
-                        VStack(alignment: .leading, spacing: 8) {
-                            TextField("名前", text: $store.state.players[index].name)
-                                .font(.subheadline).textInputAutocapitalization(.never)
-                                .focused($focused, equals: .name(index))
-                                .submitLabel(.next)
-                                .onSubmit { focused = .points(index) }
-                                .accessibilityLabel("\(index + 1)人目の名前")
-                            HStack(alignment: .firstTextBaseline) {
-                                TextField("25000", text: $store.state.inputs[index])
-                                    .keyboardType(.numbersAndPunctuation)
-                                    .numberFont(.largeTitle, weight: .semibold, design: .rounded)
-                                    .monospacedDigit().focused($focused, equals: .points(index))
-                                    .submitLabel(index == 3 ? .done : .next)
-                                    .onSubmit { if index < 3 { focused = .points(index + 1) } else { finishInput() } }
-                                    .accessibilityLabel("\(store.state.players[index].name)の持ち点")
-                                Text("点").foregroundStyle(.secondary)
-                            }
-                        }.padding(.vertical, 5)
+                    Picker("入力方法", selection: rankMode) {
+                        Text("順位順").tag(true)
+                        Text("名前順").tag(false)
+                    }.pickerStyle(.segmented)
+                    Button {
+                        finishInput()
+                        editingNames = true
+                    } label: { Label("名前を登録・変更", systemImage: "person.crop.circle.badge.pencil") }
+                }
+                Section {
+                    ForEach(0..<4, id: \.self) { row in
+                        pointRow(row)
                     }
-                } header: { Text("4人の最終持ち点").numberFont(.footnote) }
+                } header: {
+                    Text(isRankMode ? "1位から順に、名前と最終持ち点を入力" : "4人の最終持ち点").numberFont(.footnote)
+                } footer: {
+                    if isRankMode {
+                        Text("名前を選ぶと他の順位の名前と入れ替わり、各順位の入力点はそのまま残ります。同点でも入力できます。結果では同順位として計算します。")
+                            .numberFont(.caption)
+                    }
+                }
                 if store.state.rules.bankruptcyEnabled, let points, points.contains(where: { $0 < 0 }) {
                     Section("飛び終了") {
                         Label("持ち点が0点未満のため、飛び終了", systemImage: "flag.checkered")
@@ -219,6 +307,7 @@ struct EntryView: View {
                         finishInput()
                         do {
                             guard let points else { throw ScoringError.points }
+                            if isRankMode { try RankedInput.validate(points: points, order: rankOrder) }
                             _ = try Scoring.calculate(players: store.state.players, points: points, rules: store.state.rules, bankruptcyTransfers: transfers)
                             validation = nil
                             preview = GameRecord(players: store.state.players, points: points, rules: store.state.rules, bankruptcyTransfers: transfers)
@@ -229,6 +318,11 @@ struct EntryView: View {
                 }
             }
             .navigationTitle("点数入力")
+            .onAppear {
+                if !RankedInput.isValidOrder(store.state.rankOrder ?? []) {
+                    store.state.rankOrder = sortedPlayerIndices
+                }
+            }
             .onDisappear { finishInput() }
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
@@ -237,7 +331,7 @@ struct EntryView: View {
                     Button("次へ") {
                         switch focused {
                         case .name(let index): focused = .points(index)
-                        case .points(let index) where index < 3: focused = .points(index + 1)
+                        case .points(let index): focusNextPoint(after: index)
                         default: finishInput()
                         }
                     }
@@ -250,6 +344,74 @@ struct EntryView: View {
                         if store.save(record) { preview = nil; recipients = [:] }
                     })
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("戻る") { preview = nil } } }
+                }
+            }
+            .sheet(isPresented: $editingNames) {
+                PlayerNamesView(players: $store.state.players)
+            }
+        }
+    }
+}
+
+private struct PlayerNamesView: View {
+    @Binding var players: [Player]
+    @State private var names: [String]
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var focused: Int?
+    @State private var validation: String?
+
+    init(players: Binding<[Player]>) {
+        _players = players
+        _names = State(initialValue: players.wrappedValue.map(\.name))
+    }
+
+    private func finish() {
+        focused = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    ForEach(0..<4, id: \.self) { index in
+                        TextField("プレイヤー\(index + 1)", text: $names[index])
+                            .focused($focused, equals: index)
+                            .textInputAutocapitalization(.never)
+                            .submitLabel(index == 3 ? .done : .next)
+                            .onSubmit { if index < 3 { focused = index + 1 } else { finish() } }
+                            .accessibilityLabel("\(index + 1)人目の名前")
+                    }
+                } footer: { Text("4人それぞれ違う名前を登録してください。過去の記録の名前は変わりません。") }
+                if let validation { Text(validation).foregroundStyle(.red) }
+            }
+            .navigationTitle("名前を登録・変更")
+            .navigationBarTitleDisplayMode(.inline)
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { finish(); dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        finish()
+                        let trimmedNames = names.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        guard trimmedNames.allSatisfy({ !$0.isEmpty }), Set(trimmedNames).count == 4 else {
+                            validation = ScoringError.names.localizedDescription
+                            return
+                        }
+                        players = players.enumerated().map { index, player in
+                            Player(id: player.id, name: trimmedNames[index])
+                        }
+                        dismiss()
+                    }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("次へ") {
+                        if let index = focused, index < 3 { focused = index + 1 } else { finish() }
+                    }
+                    Button("完了") { finish() }
                 }
             }
         }
