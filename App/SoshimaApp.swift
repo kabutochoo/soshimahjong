@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SavedState: Codable {
     var players = ["自分", "プレイヤー2", "プレイヤー3", "プレイヤー4"].map { Player(name: $0) }
@@ -57,7 +58,7 @@ final class GameStore: ObservableObject {
     }
 }
 
-private let accent = Color(red: 0.08, green: 0.43, blue: 0.34)
+private let accent = Color(red: 0.78, green: 0.10, blue: 0.16)
 
 @main
 struct SoshimaApp: App {
@@ -86,10 +87,24 @@ struct EntryView: View {
     @EnvironmentObject private var store: GameStore
     @State private var preview: GameRecord?
     @State private var validation: String?
-    @FocusState private var focused: Int?
+    private enum InputField: Hashable { case name(Int), points(Int) }
+    @FocusState private var focused: InputField?
+    @State private var recipients: [UUID: UUID] = [:]
+
+    private var transfers: [BankruptcyTransfer] {
+        guard store.state.rules.bankruptcyEnabled, store.state.rules.bankruptcyBonus > 0, let points else { return [] }
+        return (0..<4).compactMap { index in
+            guard points[index] < 0, let to = recipients[store.state.players[index].id] else { return nil }
+            return BankruptcyTransfer(from: store.state.players[index].id, to: to)
+        }
+    }
+    private func finishInput() {
+        focused = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
 
     private var points: [Int]? {
-        let values = store.state.inputs.map { Int($0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "")) }
+        let values = store.state.inputs.map { Int(($0.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? $0).trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "")) }
         return values.allSatisfy { $0 != nil } ? values.compactMap { $0 } : nil
     }
     private var difference: Int? {
@@ -108,7 +123,7 @@ struct EntryView: View {
                         Text("ウマ・オカ・精算額をまとめて計算します。")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }.padding(.vertical, 8)
-                    LabeledContent("いまのルール", value: "\(store.state.rules.startingPoints.formatted())点持ち・\(store.state.rules.returnPoints.formatted())点返し")
+                    LabeledContent("いまのルール", value: "\(store.state.rules.startingPoints.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点持ち・\(store.state.rules.returnPoints.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点返し")
                         .font(.caption)
                 }
                 Section("4人の最終持ち点") {
@@ -116,21 +131,47 @@ struct EntryView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             TextField("名前", text: $store.state.players[index].name)
                                 .font(.subheadline).textInputAutocapitalization(.never)
+                                .focused($focused, equals: .name(index))
+                                .submitLabel(.next)
+                                .onSubmit { focused = .points(index) }
                                 .accessibilityLabel("\(index + 1)人目の名前")
                             HStack(alignment: .firstTextBaseline) {
                                 TextField("25000", text: $store.state.inputs[index])
                                     .keyboardType(.numbersAndPunctuation)
                                     .font(.system(.title, design: .rounded).weight(.semibold))
-                                    .monospacedDigit().focused($focused, equals: index)
+                                    .monospacedDigit().focused($focused, equals: .points(index))
+                                    .submitLabel(index == 3 ? .done : .next)
+                                    .onSubmit { if index < 3 { focused = .points(index + 1) } else { finishInput() } }
                                     .accessibilityLabel("\(store.state.players[index].name)の持ち点")
                                 Text("点").foregroundStyle(.secondary)
                             }
                         }.padding(.vertical, 5)
                     }
                 }
+                if store.state.rules.bankruptcyEnabled, let points, points.contains(where: { $0 < 0 }) {
+                    Section("飛び終了") {
+                        Label("持ち点が0点未満のため、飛び終了", systemImage: "flag.checkered")
+                            .foregroundStyle(accent)
+                        if store.state.rules.bankruptcyBonus > 0 {
+                            ForEach((0..<4).filter { points[$0] < 0 }, id: \.self) { index in
+                                Picker("\(store.state.players[index].name)を飛ばした人", selection: Binding<UUID?>(
+                                    get: { recipients[store.state.players[index].id] },
+                                    set: { recipients[store.state.players[index].id] = $0 }
+                                )) {
+                                    Text("選択してください").tag(UUID?.none)
+                                    ForEach((0..<4).filter { points[$0] >= 0 }, id: \.self) { winner in
+                                        Text(store.state.players[winner].name).tag(Optional(store.state.players[winner].id))
+                                    }
+                                }.pickerStyle(.menu)
+                            }
+                            Text("飛んだ人から飛ばした人へ、1人につき\(store.state.rules.bankruptcyBonus)スコアを移します。持ち点だけでは相手を特定できないため選択してください。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Section {
                     if let difference {
-                        Label(difference == 0 ? "合計が一致しています" : "あと\(difference.formatted())点で合計が一致",
+                        Label(difference == 0 ? "合計が一致しています" : "あと\(difference.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点で合計が一致",
                               systemImage: difference == 0 ? "checkmark.circle.fill" : "exclamationmark.circle")
                             .foregroundStyle(difference == 0 ? accent : .orange)
                     } else {
@@ -140,12 +181,12 @@ struct EntryView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     if let validation { Text(validation).foregroundStyle(.red).font(.callout) }
                     Button {
-                        focused = nil
+                        finishInput()
                         do {
                             guard let points else { throw ScoringError.points }
-                            _ = try Scoring.calculate(players: store.state.players, points: points, rules: store.state.rules)
+                            _ = try Scoring.calculate(players: store.state.players, points: points, rules: store.state.rules, bankruptcyTransfers: transfers)
                             validation = nil
-                            preview = GameRecord(players: store.state.players, points: points, rules: store.state.rules)
+                            preview = GameRecord(players: store.state.players, points: points, rules: store.state.rules, bankruptcyTransfers: transfers)
                         } catch { validation = error.localizedDescription }
                     } label: {
                         Text("結果を確認する").font(.headline).frame(maxWidth: .infinity).padding(.vertical, 7)
@@ -153,17 +194,25 @@ struct EntryView: View {
                 }
             }
             .navigationTitle("点数入力")
+            .onDisappear { finishInput() }
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
-                    Button("完了") { focused = nil }
+                    Button("次へ") {
+                        switch focused {
+                        case .name(let index): focused = .points(index)
+                        case .points(let index) where index < 3: focused = .points(index + 1)
+                        default: finishInput()
+                        }
+                    }
+                    Button("完了") { finishInput() }
                 }
             }
             .sheet(item: $preview) { record in
                 NavigationStack {
                     ResultView(record: record, onSave: {
-                        if store.save(record) { preview = nil }
+                        if store.save(record) { preview = nil; recipients = [:] }
                     })
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("戻る") { preview = nil } } }
                 }
@@ -173,11 +222,11 @@ struct EntryView: View {
 }
 
 func scoreText(_ score: Double) -> String {
-    String(format: "%+.1f", score)
+    String(format: "%+.1f", locale: Locale(identifier: "en_US_POSIX"), score)
 }
 
 func yenText(_ yen: Int) -> String {
-    (yen > 0 ? "+" : "") + yen.formatted() + "円"
+    (yen > 0 ? "+" : "") + yen.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))) + "円"
 }
 
 struct ResultView: View {
@@ -186,6 +235,9 @@ struct ResultView: View {
     private var rows: [ResultRow] { record.results }
     var body: some View {
         List {
+            if record.endedByBankruptcy {
+                Section { Label("飛び終了", systemImage: "flag.checkered").foregroundStyle(accent) }
+            }
             Section("スコア") {
                 ForEach(rows) { row in
                     VStack(alignment: .leading, spacing: 10) {
@@ -196,8 +248,12 @@ struct ResultView: View {
                             Text(scoreText(row.score)).font(.system(.title2, design: .rounded).bold())
                                 .foregroundStyle(row.score >= 0 ? accent : .primary)
                         }
-                        Text("\(row.points.formatted())点  ／  素点 \(scoreText(Double(row.baseUnits) / 60))  ウマ \(scoreText(Double(row.umaUnits) / 60))  オカ \(scoreText(Double(row.okaUnits) / 60))")
+                        Text("\(row.points.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点  ／  素点 \(scoreText(Double(row.baseUnits) / 60))  ウマ \(scoreText(Double(row.umaUnits) / 60))  オカ \(scoreText(Double(row.okaUnits) / 60))")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if row.bankruptcyUnits != 0 {
+                            Text("飛びボーナス \(scoreText(Double(row.bankruptcyUnits) / 60))")
+                                .font(.caption.bold()).foregroundStyle(accent)
+                        }
                         if record.rules.yenPerScore > 0 {
                             HStack {
                                 Text(row.yen >= 0 ? "受け取り" : "支払い").font(.caption)
@@ -216,11 +272,11 @@ struct ResultView: View {
                     ForEach(Scoring.payments(for: rows)) { payment in
                         VStack(alignment: .leading, spacing: 5) {
                             Text("\(payment.from.name) → \(payment.to.name)")
-                            Text("\(payment.yen.formatted())円").font(.title3.bold()).monospacedDigit()
+                            Text("\(payment.yen.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))円").font(.title3.bold()).monospacedDigit()
                         }
                     }
                     if Scoring.payments(for: rows).isEmpty { Text("支払いはありません。") }
-                    Text("1スコア = \(record.rules.yenPerScore.formatted())円。1円未満は合計が一致するよう端数調整します。")
+                    Text("1スコア = \(record.rules.yenPerScore.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))円。1円未満は合計が一致するよう端数調整します。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -294,7 +350,21 @@ struct HistoryView: View {
 
 struct RulesView: View {
     @EnvironmentObject private var store: GameStore
-    @FocusState private var editing: Bool
+    @FocusState private var editing: String?
+    @State private var customRate = false
+    private let rates = [0, 30, 50, 100, 200, 500, 1000]
+    private var rateSelection: Binding<Int> {
+        Binding(get: { customRate || !rates.contains(store.state.rules.yenPerScore) ? -1 : store.state.rules.yenPerScore },
+                set: { value in
+                    finishEditing()
+                    customRate = value == -1
+                    if value != -1 { store.state.rules.yenPerScore = value }
+                })
+    }
+    private func finishEditing() {
+        editing = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
     var body: some View {
         NavigationStack {
             Form {
@@ -310,7 +380,7 @@ struct RulesView: View {
                 Section("持ち点とオカ") {
                     integerField("開始の持ち点", value: $store.state.rules.startingPoints)
                     integerField("返し点", value: $store.state.rules.returnPoints)
-                    LabeledContent("オカ合計", value: "\(store.state.rules.oka.formatted())点")
+                    LabeledContent("オカ合計", value: "\(store.state.rules.oka.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))))点")
                     Text("オカ =（返し点 − 開始の持ち点）× 4。通常は1位に加算し、同点1位なら分けます。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -321,8 +391,26 @@ struct RulesView: View {
                     Text("合計が0になるよう設定してください。同点は該当順位のウマの平均です。小数のスコアは表示時のみ小数1桁に丸めます。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Section("飛び終了") {
+                    Toggle("0点未満で終了する", isOn: $store.state.rules.bankruptcyEnabled)
+                    if store.state.rules.bankruptcyEnabled {
+                        integerField("飛ばした人のボーナス", value: $store.state.rules.bankruptcyBonus)
+                        Text("単位はスコアです。例：10なら飛んだ人 −10.0、飛ばした人 +10.0。0ならボーナスなし。0点ちょうどでは飛び終了にしません。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Mリーグ設定では飛び終了はオフです。オンにするとカスタムルールになります。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("金額換算（任意）") {
-                    integerField("1スコアあたりの円", value: $store.state.rules.yenPerScore)
+                    Picker("1スコアあたりの円", selection: rateSelection) {
+                        ForEach(rates, id: \.self) { rate in
+                            Text(rate == 0 ? "換算しない（0円）" : "\(rate)円").tag(rate)
+                        }
+                        Text("その他").tag(-1)
+                    }.pickerStyle(.menu)
+                    if rateSelection.wrappedValue == -1 {
+                        integerField("その他の金額（円）", value: $store.state.rules.yenPerScore)
+                    }
                     Text("0円ならスコアのみ記録します。例：100円なら +42.0 は +4,200円です。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -331,8 +419,9 @@ struct RulesView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }.navigationTitle("ルール")
+                .onDisappear { finishEditing() }
                 .scrollDismissesKeyboard(.interactively)
-                .toolbar { ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("完了") { editing = false } } }
+                .toolbar { ToolbarItemGroup(placement: .keyboard) { Spacer(); Button("完了") { finishEditing() } } }
         }
     }
 
@@ -340,9 +429,10 @@ struct RulesView: View {
         HStack {
             Text(title)
             Spacer()
-            TextField(title, value: value, format: .number.grouping(.never))
+            TextField(title, value: value, format: .number.grouping(.never).locale(Locale(identifier: "en_US_POSIX")))
                 .multilineTextAlignment(.trailing).keyboardType(.numbersAndPunctuation)
-                .monospacedDigit().focused($editing)
+                .monospacedDigit().focused($editing, equals: title)
+                .submitLabel(.done).onSubmit { finishEditing() }
                 .accessibilityLabel(title)
         }
     }

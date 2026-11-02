@@ -76,4 +76,55 @@ final class ScoringTests: XCTestCase {
             }
         }
     }
+    func testBankruptcyBonusAndSettlement() throws {
+        let rules = Rules(yenPerScore: 100, bankruptcyEnabled: true, bankruptcyBonus: 10)
+        let transfer = BankruptcyTransfer(from: players[3].id, to: players[1].id)
+        let record = GameRecord(players: players, points: [50000, 35000, 20000, -5000], rules: rules,
+                                bankruptcyTransfers: [transfer])
+        let rows = record.results
+        XCTAssertTrue(record.endedByBankruptcy)
+        XCTAssertEqual(rows.map(\.score), [70, 25, -20, -75])
+        XCTAssertEqual(rows.map(\.bankruptcyUnits), [0, 600, 0, -600])
+        XCTAssertEqual(rows.reduce(0) { $0 + $1.yen }, 0)
+        let copy = try JSONDecoder().decode(GameRecord.self, from: JSONEncoder().encode(record))
+        XCTAssertEqual(copy.results, rows)
+    }
+
+    func testMultipleBankruptPlayersAndMissingRecipient() throws {
+        let rules = Rules(bankruptcyEnabled: true, bankruptcyBonus: 10)
+        let points = [80000, 30000, -3000, -7000]
+        XCTAssertThrowsError(try Scoring.calculate(players: players, points: points, rules: rules))
+        let transfers = [BankruptcyTransfer(from: players[2].id, to: players[0].id),
+                         BankruptcyTransfer(from: players[3].id, to: players[0].id)]
+        let rows = try Scoring.calculate(players: players, points: points, rules: rules, bankruptcyTransfers: transfers)
+        XCTAssertEqual(rows[0].bankruptcyUnits, 1200)
+        XCTAssertEqual(rows.reduce(0) { $0 + $1.scoreUnits }, 0)
+        XCTAssertThrowsError(try Scoring.calculate(players: players, points: points, rules: rules,
+            bankruptcyTransfers: [transfers[0], BankruptcyTransfer(from: players[3].id, to: players[2].id)]))
+    }
+
+    func testZeroPointsAndNoBonus() throws {
+        let rules = Rules(bankruptcyEnabled: true, bankruptcyBonus: 0)
+        let negative = GameRecord(players: players, points: [50000, 35000, 20000, -5000], rules: rules)
+        XCTAssertTrue(negative.endedByBankruptcy)
+        XCTAssertEqual(negative.results.count, 4)
+        let zero = GameRecord(players: players, points: [50000, 30000, 20000, 0], rules: rules)
+        XCTAssertFalse(zero.endedByBankruptcy)
+        XCTAssertEqual(zero.results.count, 4)
+        XCTAssertFalse(Rules.mLeague.bankruptcyEnabled)
+    }
+
+    func testOldRecordsRemainReadable() throws {
+        let original = GameRecord(players: players, points: [42000, 31000, 18000, 9000], rules: .mLeague)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        object.removeValue(forKey: "bankruptcyTransfers")
+        var rules = try XCTUnwrap(object["rules"] as? [String: Any])
+        rules.removeValue(forKey: "bankruptcyEnabled")
+        rules.removeValue(forKey: "bankruptcyBonus")
+        object["rules"] = rules
+        let restored = try JSONDecoder().decode(GameRecord.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(restored.results, original.results)
+        XCTAssertFalse(restored.rules.bankruptcyEnabled)
+    }
+
 }

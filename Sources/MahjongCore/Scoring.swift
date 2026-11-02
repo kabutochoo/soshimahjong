@@ -6,13 +6,31 @@ public struct Rules: Codable, Equatable {
     public var uma: [Int]
     /// Yen per one score point (1,000 table points).
     public var yenPerScore: Int
+    public var bankruptcyEnabled: Bool
+    public var bankruptcyBonus: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case startingPoints, returnPoints, uma, yenPerScore, bankruptcyEnabled, bankruptcyBonus
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        startingPoints = try c.decode(Int.self, forKey: .startingPoints)
+        returnPoints = try c.decode(Int.self, forKey: .returnPoints)
+        uma = try c.decode([Int].self, forKey: .uma)
+        yenPerScore = try c.decode(Int.self, forKey: .yenPerScore)
+        bankruptcyEnabled = try c.decodeIfPresent(Bool.self, forKey: .bankruptcyEnabled) ?? false
+        bankruptcyBonus = try c.decodeIfPresent(Int.self, forKey: .bankruptcyBonus) ?? 10
+    }
 
     public init(startingPoints: Int = 25_000, returnPoints: Int = 30_000,
-                uma: [Int] = [30, 10, -10, -30], yenPerScore: Int = 0) {
+                uma: [Int] = [30, 10, -10, -30], yenPerScore: Int = 0,
+                bankruptcyEnabled: Bool = false, bankruptcyBonus: Int = 10) {
         self.startingPoints = startingPoints
         self.returnPoints = returnPoints
         self.uma = uma
         self.yenPerScore = yenPerScore
+        self.bankruptcyEnabled = bankruptcyEnabled
+        self.bankruptcyBonus = bankruptcyBonus
     }
 
     public static let mLeague = Rules()
@@ -38,7 +56,8 @@ public struct ResultRow: Identifiable, Equatable {
     public let umaUnits: Int
     public let okaUnits: Int
     /// Exact units: 60 units = one score point, including three-way ties.
-    public var scoreUnits: Int { baseUnits + umaUnits + okaUnits }
+    public var bankruptcyUnits: Int = 0
+    public var scoreUnits: Int { baseUnits + umaUnits + okaUnits + bankruptcyUnits }
     public var score: Double { Double(scoreUnits) / 60 }
     public var yen: Int
 }
@@ -50,17 +69,24 @@ public struct Payment: Identifiable, Equatable {
     public let yen: Int
 }
 
+public struct BankruptcyTransfer: Codable, Equatable {
+    public let from: UUID
+    public let to: UUID
+    public init(from: UUID, to: UUID) { self.from = from; self.to = to }
+}
+
 public enum ScoringError: String, Error, LocalizedError {
+    case bankruptcy = "飛んだ人ごとに、飛ばした人を選んでください。飛んだ本人や別の飛んだ人は選べません。"
     case playerCount = "4人分の名前と持ち点を入力してください。"
     case names = "名前は重複しないよう、全員分入力してください。"
-    case rules = "持ち点・返し点は100点単位、ウマの合計は0、単価は0〜10,000円にしてください。"
+    case rules = "持ち点・返し点は100点単位、ウマの合計は0、単価は0〜10,000円、飛びボーナスは0〜1,000スコアにしてください。"
     case points = "持ち点は−100,000〜200,000点の範囲で、100点単位で入力してください。"
     case total = "持ち点の合計が開始時の合計と一致していません。供託を精算してから保存してください。"
     public var errorDescription: String? { rawValue }
 }
 
 public enum Scoring {
-    public static func calculate(players: [Player], points: [Int], rules: Rules) throws -> [ResultRow] {
+    public static func calculate(players: [Player], points: [Int], rules: Rules, bankruptcyTransfers: [BankruptcyTransfer] = []) throws -> [ResultRow] {
         guard players.count == 4, points.count == 4, Set(players.map(\.id)).count == 4 else {
             throw ScoringError.playerCount
         }
@@ -70,7 +96,7 @@ public enum Scoring {
               (100...100_000).contains(rules.returnPoints),
               rules.startingPoints % 100 == 0, rules.returnPoints % 100 == 0,
               rules.uma.count == 4, rules.uma.allSatisfy({ (-1000...1000).contains($0) }),
-              rules.uma.reduce(0, +) == 0, (0...10_000).contains(rules.yenPerScore) else {
+              rules.uma.reduce(0, +) == 0, (0...10_000).contains(rules.yenPerScore), (0...1000).contains(rules.bankruptcyBonus) else {
             throw ScoringError.rules
         }
         guard points.allSatisfy({ (-100_000...200_000).contains($0) && $0 % 100 == 0 }) else {
@@ -94,6 +120,20 @@ public enum Scoring {
             }
             position += count
         }
+        let bankruptIDs = Set(players.indices.filter { points[$0] < 0 }.map { players[$0].id })
+        if rules.bankruptcyEnabled && rules.bankruptcyBonus > 0 && !bankruptIDs.isEmpty {
+            guard bankruptcyTransfers.count == bankruptIDs.count,
+                  Set(bankruptcyTransfers.map(\.from)) == bankruptIDs,
+                  bankruptcyTransfers.allSatisfy({ transfer in
+                      players.contains { $0.id == transfer.to } && !bankruptIDs.contains(transfer.to)
+                  }) else { throw ScoringError.bankruptcy }
+            for transfer in bankruptcyTransfers {
+                for index in rows.indices {
+                    if rows[index].id == transfer.from { rows[index].bankruptcyUnits -= rules.bankruptcyBonus * 60 }
+                    if rows[index].id == transfer.to { rows[index].bankruptcyUnits += rules.bankruptcyBonus * 60 }
+                }
+            }
+        } else if !bankruptcyTransfers.isEmpty { throw ScoringError.bankruptcy }
         // Largest remainder allocation balances whole yen, including tied fractional amounts.
         let numerators = rows.map { $0.scoreUnits * rules.yenPerScore }
         let floors = numerators.map { Int(floor(Double($0) / 60)) }
@@ -132,9 +172,12 @@ public struct GameRecord: Codable, Identifiable {
     public let players: [Player]
     public let points: [Int]
     public let rules: Rules
-    public init(players: [Player], points: [Int], rules: Rules) {
+    public let bankruptcyTransfers: [BankruptcyTransfer]?
+    public var endedByBankruptcy: Bool { rules.bankruptcyEnabled && points.contains { $0 < 0 } }
+    public init(players: [Player], points: [Int], rules: Rules, bankruptcyTransfers: [BankruptcyTransfer] = []) {
         self.id = UUID(); self.date = Date()
         self.players = players; self.points = points; self.rules = rules
+        self.bankruptcyTransfers = bankruptcyTransfers
     }
-    public var results: [ResultRow] { (try? Scoring.calculate(players: players, points: points, rules: rules)) ?? [] }
+    public var results: [ResultRow] { (try? Scoring.calculate(players: players, points: points, rules: rules, bankruptcyTransfers: bankruptcyTransfers ?? [])) ?? [] }
 }
